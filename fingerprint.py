@@ -2,7 +2,7 @@
 # @Author: Aswin Sivaraman
 # @Date:   2018-01-30 02:50:47
 # @Last Modified by:   Aswin Sivaraman
-# @Last Modified time: 2018-02-02 05:18:05
+# @Last Modified time: 2018-02-02 13:49:27
 
 from sys import byteorder
 from array import array
@@ -148,9 +148,6 @@ def build_catalog(path):
 
     return A
 
-def is_silent(data_chunk):
-    return max(data_chunk) < THRESHOLD
-
 def normalize(snd_data):
     MAXIMUM = 16384
     scale = MAXIMUM/max(abs(i) for i in snd_data)
@@ -206,7 +203,7 @@ def listen_to_microphone():
         data.extend(chunk)
 
         # Check for silence
-        silent = is_silent(chunk)
+        silent = max(chunk) < THRESHOLD
 
         if not silent and not started:
             print("Recording...")

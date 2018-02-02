@@ -1,0 +1,4 @@
+PyAudio>=0.2.11
+numpy>=1.13.3
+librosa>=0.5.1
+matplotlib>=2.0.2
