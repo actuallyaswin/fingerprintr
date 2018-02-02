@@ -2,77 +2,151 @@
 # @Author: Aswin Sivaraman
 # @Date:   2018-01-30 02:50:47
 # @Last Modified by:   Aswin Sivaraman
-# @Last Modified time: 2018-02-02 03:05:31
+# @Last Modified time: 2018-02-02 05:18:05
 
-from heapq import nlargest
 from sys import byteorder
 from array import array
 import matplotlib.pyplot as plt
 import numpy as np
 import pyaudio
 import librosa
+import json
 import os
 
-MAX_DURATION = 10 # seconds
+MAX_DURATION = 5 # seconds
 CHUNK_SIZE = 1024
 SAMPLE_RATE = 44100
 THRESHOLD = 500
 FFT_SIZE = 1024
 
-PLT_START = 5
-PLT_END = 15
+PLT_STARTTIME = 5 # seconds
+PLT_DURATION =  5 # seconds
 
 TZ_SIZE = 5 # constellation points
 TZ_OFFSET = 3 # offset of the anchor point
+
+CONFIDENCE = 50
+
+def plot_constellation(power,constellation,start=PLT_STARTTIME,duration=PLT_DURATION):
+    # Plots the power spectrogram
+    plt.imshow(power, origin='lower')
+
+    # Scatter plot the constellation / landmarks
+    y, x = np.argwhere(constellation > 0).T
+    plt.scatter(x,y,marker='x',c='white')
+    for i in range(len(x)):
+        plt.annotate(int(constellation[y[i],x[i]]), (x[i],y[i]), color='white')
+
+    # Set axis limits based on top-level parameters
+    f_start = librosa.core.time_to_frames(start, sr=SAMPLE_RATE, n_fft=FFT_SIZE)
+    f_finish = librosa.core.time_to_frames(start+duration, sr=SAMPLE_RATE, n_fft=FFT_SIZE)
+    plt.xlim(f_start, f_finish)
+    plt.ylim(0,200)
+    plt.tight_layout()
+    plt.show()
+
+def pick_best_match(matches):
+    # Pick the song with the most matches
+    result = max(matches, key=matches.get)
+
+    # Check if the number of matches meets the confidence minimum
+    if matches[result] < CONFIDENCE:
+        print("Unable to find a matching song!")
+    else:
+        print("You are listening to",result,"!")
+
+def match_fingerprint(landmarks, catalog):
+    # Prepare a histogram for matches
+    M = {}
+
+    # Loop through each landmark and generate an address for it
+    for i in range(TZ_OFFSET, len(landmarks)-TZ_SIZE):
+        anchor = i-TZ_OFFSET
+        for j in range(i, i+TZ_SIZE):
+            address = str(landmarks[anchor][0]) +\
+                        ";" + str(landmarks[j][0]) +\
+                        ";" + str(landmarks[j][1]-landmarks[anchor][1])
+
+            # Try finding this address in the catalog
+            if address in catalog:
+                song_id = catalog[address].split(';')[1]
+                if song_id in M:
+                    M[song_id] += 1
+                else:
+                    M[song_id] = 1
+
+    return M
+
+def compute_fingerprint(snd_data):
+    # Convert the audio to a spectrogram
+    D = librosa.stft(snd_data, n_fft=FFT_SIZE)[:200,:]
+    P = librosa.amplitude_to_db(D, ref=np.max)
+    num_frames = D.shape[1]
+
+    # Create a map of landmarks
+    L = {}
+    C = np.zeros_like(P)
+    label = 0
+    for frame in range(0,num_frames,32):
+        bins = []
+        bins.append((np.max(P[0:20,frame]), 0+np.argmax(P[0:20,frame]))) # Find a peak in FFT bins 0:20
+        bins.append((np.max(P[20:40,frame]), 20+np.argmax(P[20:40,frame]))) # Find a peak in FFT bins 20:40
+        bins.append((np.max(P[40:80,frame]), 40+np.argmax(P[40:80,frame]))) # Find a peak in FFT bins 40:80
+        bins.append((np.max(P[80:160,frame]), 80+np.argmax(P[80:160,frame]))) # Find a peak in FFT bins 80:160
+        bins.append((np.max(P[160:,frame]), 160+np.argmax(P[160:,frame]))) # Find a peak in FFT bins 160:end
+        avg = np.mean([bins[i][0] for i in range(len(bins))])
+        peaks = [bins[i][1] for i in range(len(bins)) if bins[i][0] > avg] # Only keep the peaks larger than the average
+        for frequency in peaks:
+            L[label] = (frequency, frame)
+            label += 1
+            C[frequency,frame] = label
+
+    return L, C, P
+
+def load_catalog(filepath):
+    with open(filepath, 'r') as fp:
+        r = json.load(fp)
+    print("Loaded "+filepath+"!")
+    return r
 
 def build_catalog(path):
 
     # List all the files in the path that are WAV files
     files = [x for x in os.listdir(path) if x.endswith('.wav')]
 
+    # Define a hashmap for the catalog
+    A = {}
+
     for file in files:
+
+        # Set the song ID
+        song_id = os.path.splitext(file)[0]
 
         # Load the raw audio data
         y, sr = librosa.load(os.path.join(path,file), sr=SAMPLE_RATE, mono=True)
 
-        # For each file, convert the audio to a spectrogram
-        D = librosa.stft(y, n_fft=FFT_SIZE)[:200,:]
-        num_frames = D.shape[1]
+        # Run the fingerprint algorithm to get the landmarks
+        L, C, P = compute_fingerprint(y)
 
-        # Plot the power spectrogram
-        P = librosa.amplitude_to_db(D, ref=np.max)
-        plt.imshow(P, origin='lower')
+        # Loop through each landmark, determine the target zones, and save the addresses
+        for i in range(TZ_OFFSET, len(L)-TZ_SIZE):
+            anchor = i-TZ_OFFSET
+            for j in range(i, i+TZ_SIZE):
+                # address = [frequency of anchor;frequency of point;delta time between anchor and point]
+                address = str(L[anchor][0]) + ";" + str(L[j][0]) + ";" + str(L[j][1]-L[anchor][1])
 
-        # Create a constellation map
-        C = np.zeros_like(P)
-        label = 0
-        for i in range(0,num_frames,32):
-            bins = []
-            bins.append((np.max(P[0:20,i]), 0+np.argmax(P[0:20,i])))
-            bins.append((np.max(P[20:40,i]), 20+np.argmax(P[20:40,i])))
-            bins.append((np.max(P[40:80,i]), 40+np.argmax(P[40:80,i])))
-            bins.append((np.max(P[80:160,i]), 80+np.argmax(P[80:160,i])))
-            bins.append((np.max(P[160:,i]), 160+np.argmax(P[160:,i])))
-            avg = np.mean([bins[i][0] for i in range(len(bins))])
-            peaks = [bins[i][1] for i in range(len(bins)) if bins[i][0] > avg]
-            for peak in peaks:
-                label += 1
-                C[peak,i] = label
+                # Couple the address with the identifier
+                # identifier = [absolute time of the anchor in the song;id of the song]
+                A[address] = str(L[anchor][1]) + ";" + str(song_id)
 
-        # Plot the constellation map
-        y, x = np.argwhere(C > 0).T
-        plt.scatter(x,y,marker='x',c='white')
-        for i in range(len(x)):
-            plt.annotate(int(C[y[i],x[i]]), (x[i],y[i]), color='white')
+        # plot_constellation(P,C)
 
-        # Show the plot
-        plt.xlim(librosa.core.time_to_frames(PLT_START, sr=SAMPLE_RATE, n_fft=FFT_SIZE),
-                librosa.core.time_to_frames(PLT_END, sr=SAMPLE_RATE, n_fft=FFT_SIZE))
-        plt.ylim(0,200)
-        plt.tight_layout()
-        plt.show()
+    with open('catalog.json', 'w') as fp:
+        json.dump(A, fp, sort_keys=True, indent=4, separators=(',', ': '))
 
-    return
+    print("Created catalog.json!")
+
+    return A
 
 def is_silent(data_chunk):
     return max(data_chunk) < THRESHOLD
@@ -143,7 +217,7 @@ def listen_to_microphone():
             else:
                 num_silent += 1
         if num_sound > (MAX_DURATION * chunks_per_second):
-            print("3 second recording done.")
+            print(MAX_DURATION,"second recording done.")
             break
         if num_silent > (3 * chunks_per_second):
             print("Too quiet!")
@@ -163,11 +237,12 @@ def listen_to_microphone():
 
 def main():
 
-    catalog = build_catalog('data')
-    # catalog = load_catalog('catalog.npy')
-
-    # data = listen_to_microphone()
-
+    # catalog = build_catalog('data')
+    catalog = load_catalog('catalog.json')
+    data = listen_to_microphone()
+    landmarks = compute_fingerprint(data)[0]
+    matches = match_fingerprint(landmarks, catalog)
+    result = pick_best_match(matches)
 
 if __name__ == '__main__':
     main()
